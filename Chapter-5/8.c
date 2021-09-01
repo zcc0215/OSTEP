@@ -3,6 +3,7 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <errno.h>
 
 int main(char argc,char * argv[]){
   int fd[2];
@@ -20,15 +21,26 @@ int main(char argc,char * argv[]){
         fprintf(stderr,"fork fail\n");
         exit(1);
     }else if (ppid == 0) {
-        char *msg = "Hello!\n";
-        close(fd[0]);//关闭读管道
-        write(fd[1], msg, sizeof(char) * strlen(msg));
+        close(fd[0]);
+        if(fd[1] != STDOUT_FILENO){
+            if(dup2(fd[1],STDOUT_FILENO)!= STDOUT_FILENO){
+                fprintf(stderr,"dup2 fail\n");
+            }
+            close(fd[1]);
+        }
+        printf("Hello");
     }else {
         wait(NULL);
-        char asw[10];
-        close(fd[1]);//关闭写管道
-        int res = read(fd[0], asw, sizeof(char) * 10);
-        printf("size:%d, %s", res, asw);
+        close(fd[1]);
+        if(fd[0] != STDIN_FILENO){
+            if(dup2(fd[0],STDIN_FILENO)!= STDIN_FILENO){
+                fprintf(stderr,"dup2 fail\n");
+            }
+            close(fd[0]);
+        }
+        char asw[20];
+        int res = read(STDIN_FILENO, asw, sizeof(char) * 20);
+        printf("size:%d, %s\n", res, asw);
     }
   }
     return 0;
