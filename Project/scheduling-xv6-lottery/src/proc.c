@@ -6,6 +6,7 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
+#include "pstat.h"
 
 struct {
   struct spinlock lock;
@@ -88,6 +89,7 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+  p->tickets = 1;
 
   release(&ptable.lock);
 
@@ -200,6 +202,9 @@ fork(void)
   np->parent = curproc;
   *np->tf = *curproc->tf;
 
+  // child inherits tickets from parent.
+  np->tickets = curproc->tickets;
+
   // Clear %eax so that fork returns 0 in the child.
   np->tf->eax = 0;
 
@@ -311,6 +316,44 @@ wait(void)
   }
 }
 
+long int val = 1;
+
+// Linear congruential generator
+// https://en.wikipedia.org/wiki/Linear_congruential_generator
+// https://sourceware.org/git/?p=glibc.git;a=blob;f=stdlib/random_r.c;hb=HEAD
+long int
+random()
+{
+    // same as (val * 1103515245U + 12345U) % 0x80000000
+    val = (1103515245U * val + 12345U) & 0x7fffffff;
+    return val;
+}
+
+// random choose a winner ticket between 0 and totaltickets
+// https://stackoverflow.com/questions/2509679/how-to-generate-a-random-integer-number-from-within-a-range
+// assumes 0 <= totaltickets <= RAND_MAX
+// returns in the closed interval [0, totaltickets]
+long
+getwinner(int totaltickets)
+{
+  unsigned long
+    // totaltickets <= RAND_MAX < ULONG_MAX, so this is okay.
+    num_bins = (unsigned long) totaltickets + 1,
+    num_rand = (unsigned long) 0x7fffffff + 1,
+    bin_size = num_rand / num_bins,
+    defect   = num_rand % num_bins;
+
+  long x;
+  do {
+   x = random();
+  }
+  // This is carefully written not to overflow
+  while (num_rand - defect <= (unsigned long)x);
+
+  // Truncated division is intentional
+  return x/bin_size;
+}
+
 //PAGEBREAK: 42
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
@@ -332,9 +375,26 @@ scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
+    
+    // counter: used to track if we’ve found the winner yet
+    int counter = 0;
+    int totaltickets = 0;
+    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+      if (p->state == RUNNABLE)
+        totaltickets += p->tickets;
+    }
+
+    long winner = getwinner(totaltickets);
+
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->state != RUNNABLE)
         continue;
+
+      counter += p->tickets;
+      if (counter <= winner)
+        continue;
+
+      uint ticks0 = ticks;
 
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
@@ -349,9 +409,12 @@ scheduler(void)
       // Process is done running for now.
       // It should have changed its p->state before coming back.
       c->proc = 0;
+      p->ticks += (ticks - ticks0);
+      if (p->tickets > 1)
+        cprintf("XV6_TEST_OUTPUT pid: %d, parent: %d, tickets:%d, ticks: %d\n",
+          p->pid, p->parent->pid, p->tickets, p->ticks);
     }
     release(&ptable.lock);
-
   }
 }
 
@@ -531,4 +594,36 @@ procdump(void)
     }
     cprintf("\n");
   }
+}
+
+// Sets the number of tickets of the calling process
+int
+settickets(int number)
+{
+  struct proc *p;
+  acquire(&ptable.lock);
+  int currentpid = myproc()->pid;
+  for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if (p->pid == currentpid) {
+      p->tickets = number;
+      release(&ptable.lock);
+      return 0;
+    }
+  }
+  release(&ptable.lock);
+  return -1;
+}
+
+int
+getpinfo(struct pstat *p)
+{
+  acquire(&ptable.lock);
+  for (int i = 0; i < NPROC; i++) {
+    p->inuse[i] = ptable.proc[i].state == UNUSED ? 0 : 1;
+    p->pid[i] = ptable.proc[i].pid;
+    p->tickets[i] = ptable.proc[i].tickets;
+    p->ticks[i] = ptable.proc[i].ticks;
+  }
+  release(&ptable.lock);
+  return 0;
 }
