@@ -1,0 +1,442 @@
+Binary files src/_clonetest and src-finished/_clonetest differ
+diff -ruN src/clonetest.c src-finished/clonetest.c
+--- src/clonetest.c	1969-12-31 18:00:00.000000000 -0600
++++ src-finished/clonetest.c	2021-03-26 15:10:49.014917482 -0500
+@@ -0,0 +1,72 @@
++/*
++Walks through an example of the clone() syscall. Prints results to stdout.
++*/
++#include "types.h"
++#include "stat.h"
++#include "user.h"
++
++#define PGSIZE 0x1000
++
++// this variable should be accessible and modifiable by the child
++int sharedVal = 20;
++
++// this function will be run by the cloned process
++// it takes a void* argument which will be dereferenced to an integer pointer
++void func(void *arg, void *arg2)
++{
++  int pid = getpid();
++  printf(1, "Child: pid is %d\n", pid);
++  printf(1, "Child: Dereferenced function arg to %d\n", *(int*) arg);
++  *(int*) arg += 10;
++  printf(1, "Child: Incremented arg's value by 10. arg is now %d\n", *(int*) arg);
++  sharedVal += 10;
++  printf(1, "Child: Incremented sharedVal by 10. sharedVal is now %d\n", sharedVal);
++
++  exit();
++  printf(1, "ERROR: Child continued past exit()\n");
++}
++
++int main(int argc, char *argv[])
++{
++  int parent_pid, child_pid;
++  char *stack_bottom;
++  int test_val = 0, test_2 = 0;
++
++  parent_pid = getpid();
++  printf(1, "Parent: pid is %d\n", parent_pid);
++
++  // expand address space by 1 page
++  // `stack_bottom` is now the address of the bottom of the new page
++  stack_bottom = sbrk(PGSIZE);
++
++  // run clone(), providing the function to be run, the address
++  // to an arg, and the address of the bottom of the newly-
++  // allocated page
++  child_pid = clone(&func, (void*) &test_val, (void*) &test_2, stack_bottom);
++
++  // sleep while the cloned process runs
++  // we do this so that we can run this test without using join()
++  sleep(10);
++
++  printf(1, "Parent: pid of cloned thread is %d\n", child_pid);
++  if (child_pid <= parent_pid)
++  {
++    printf(1, "Error: Child pid should be greater than parent pid\n");
++  }
++
++  printf(1, "Parent: test_val is now %d\n", test_val);
++  if (test_val != 10)
++  {
++    printf(1, "Error: test_val should have been incremented by 10\n");
++  }
++
++  printf(1, "Parent: sharedVal is now %d\n", sharedVal);
++  if (sharedVal != 30)
++  {
++    printf(1, "Error: sharedVal should have been incremented to 30\n");
++  }
++
++  printf(1, "Test finished\n");
++  exit();
++  printf(1, "ERROR: Parent continued past exit()\n");
++}
+diff -ruN src/defs.h src-finished/defs.h
+--- src/defs.h	2019-09-25 22:28:17.000000000 -0500
++++ src-finished/defs.h	2021-03-26 15:10:49.006913482 -0500
+@@ -155,6 +155,8 @@
+ int             fetchint(uint, int*);
+ int             fetchstr(uint, char**);
+ void            syscall(void);
++int             clone(void(*fnc)(void*, void*), void*, void*, void*);
++int             join(void**);
+ 
+ // timer.c
+ void            timerinit(void);
+diff -ruN src/proc.c src-finished/proc.c
+--- src/proc.c	2019-09-25 22:28:17.000000000 -0500
++++ src-finished/proc.c	2021-03-27 14:41:21.911027052 -0500
+@@ -532,3 +532,131 @@
+     cprintf("\n");
+   }
+ }
++
++int clone(void(*fcn)(void*, void*), void* arg1, void* arg2, void* stack){
++  int i, pid;
++  struct proc *np;
++  struct proc *curproc = myproc();
++
++  // if((uint) stack % PGSIZE != 0)
++  //   return -1;
++
++  if(curproc->sz - (uint)stack < PGSIZE)
++    return -1;
++
++  // Allocate process.
++  if((np = allocproc()) == 0)
++    return -1;
++
++  np->pgdir = curproc->pgdir; //copy page directory from the current process
++  np->sz = curproc->sz;
++  np->parent = curproc;
++  *np->tf = *curproc->tf;
++
++  // have to put the args of the function into the stack
++  void * stackArg1, *stackArg2, *stackRet;
++
++  //pushing the fake return address to the stack of thread
++  stackRet = stack + PGSIZE -(3*sizeof(void *));
++  *(uint*)stackRet = 0xFFFFFFF;
++
++  //pushing the first argument to the stack of thread
++  stackArg1 = stack + PGSIZE -(2*sizeof(void *));
++  *(uint*)stackArg1 = (uint)arg1;
++
++  //pushing the second argument to the stack of thread
++  stackArg2 = stack + PGSIZE - sizeof(void *);
++  *(uint*)stackArg2 = (uint)arg2;
++  //previous - tried to creat/ put args onto stck
++  //   uint user_stack[3];
++  //   user_stack[0] = 0xffffffff;
++  //   user_stack[1] = (uint) arg1;
++  //   user_stack[2] = (uint) arg2;
++  //   uint stack_top = (uint) stack + PGSIZE; // set th stack top
++  //   stack_top -= 12; // making room for the values we just added to the stack
++
++  np->tf->esp = (uint) stack; //putting the address of stack in the stack pointer
++  np->tf->eax = 0;  // Clear %eax so that fork returns 0 in the child.
++  np->threadstack = stack;   //saving the address of the stack
++
++
++  //   if(copyout(np->pgdir, stack_top, user_stack, 12) < 0){
++  //     // panic("clone:creating the stack went awry");
++  //     return -1;
++  //   }
++
++  //   // np->tf->ebp = (uint) stack_top; //set stack base and stack pointer to stack top
++  //   np->tf->eip = (uint) fcn; // set the instruction pointer to the function
++
++  np->tf->esp += PGSIZE -(3*sizeof(void*)) ;
++  np->tf->ebp = np->tf->esp;
++  np->tf->eip = (uint) fcn; //begin excuting code from this function 
++
++  // from fork
++  for(i = 0; i < NOFILE; i++)
++    if(curproc->ofile[i])
++      np->ofile[i] = filedup(curproc->ofile[i]);
++  np->cwd = idup(curproc->cwd);
++
++  safestrcpy(np->name, curproc->name, sizeof(curproc->name));
++
++  pid = np->pid;
++
++  acquire(&ptable.lock);
++
++  np->state = RUNNABLE;
++
++  release(&ptable.lock);
++
++  return pid;
++}
++
++
++int
++join(void** stack)
++{
++  struct proc *p;           // The thread iterator
++  int havekids, pid;
++  struct proc *cp = myproc();
++  acquire(&ptable.lock);
++  for(;;){
++      // Scan through table looking for zombie children.
++      havekids = 0;
++      for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++
++      // If the current process is not my parent or share the same address space...  
++      if(p->parent != cp || p->pgdir != p->parent->pgdir)
++        continue; // You are not a thread
++       
++      havekids = 1;
++      if(p->state == ZOMBIE){
++	      pid = p->pid;
++        // Removing thread from the kernal stack
++        kfree(p->kstack);
++        p->kstack = 0;
++        
++        stack = p->threadstack;
++        p->threadstack = 0;
++        p->pid = 0;
++        p->parent = 0;
++        p->name[0] = 0;
++        p->killed = 0;
++        p->state = UNUSED;
++      
++
++        release(&ptable.lock);
++	      return pid;
++      }
++      
++    }
++
++    // No point waiting if we don't have any children.
++    if(!havekids || cp->killed){
++      release(&ptable.lock);
++      return -1;
++    }
++
++    // Wait for children to exit.  (See wakeup1 call in proc_exit.)
++    sleep(cp, &ptable.lock);  //DOC: wait-sleep
++  }
++}
+\ No newline at end of file
+diff -ruN src/proc.h src-finished/proc.h
+--- src/proc.h	2019-09-25 22:28:17.000000000 -0500
++++ src-finished/proc.h	2021-03-27 11:26:20.584965538 -0500
+@@ -42,6 +42,7 @@
+   enum procstate state;        // Process state
+   int pid;                     // Process ID
+   struct proc *parent;         // Parent process
++  // struct proc *pthread;
+   struct trapframe *tf;        // Trap frame for current syscall
+   struct context *context;     // swtch() here to run process
+   void *chan;                  // If non-zero, sleeping on chan
+@@ -49,6 +50,7 @@
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++  void* threadstack;
+ };
+ 
+ // Process memory is laid out contiguously, low addresses first:
+diff -ruN src/syscall.c src-finished/syscall.c
+--- src/syscall.c	2019-09-25 22:28:17.000000000 -0500
++++ src-finished/syscall.c	2021-03-26 15:10:49.010915483 -0500
+@@ -103,6 +103,8 @@
+ extern int sys_wait(void);
+ extern int sys_write(void);
+ extern int sys_uptime(void);
++extern int sys_clone(void);
++extern int sys_join(void);
+ 
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -126,6 +128,8 @@
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_clone]   sys_clone,
++[SYS_join]    sys_join,
+ };
+ 
+ void
+diff -ruN src/syscall.h src-finished/syscall.h
+--- src/syscall.h	2019-09-25 22:28:17.000000000 -0500
++++ src-finished/syscall.h	2021-03-26 15:10:49.010915483 -0500
+@@ -20,3 +20,5 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_clone  22
++#define SYS_join   23
+diff -ruN src/sysproc.c src-finished/sysproc.c
+--- src/sysproc.c	2019-09-25 22:28:17.000000000 -0500
++++ src-finished/sysproc.c	2021-03-27 13:20:03.074831895 -0500
+@@ -6,6 +6,34 @@
+ #include "memlayout.h"
+ #include "mmu.h"
+ #include "proc.h"
++#include <stddef.h>
++
++int sys_clone(void)
++{
++  void (*fcn)(void*, void*);
++
++  if(argptr(0, (void*)&fcn, sizeof(void*)) < 0){
++    return -1;
++  }
++
++  int arg1, arg2, stack;
++
++  if(argint(1, &arg1) < 0 || argint(2, &arg2) <0 || argint(3, &stack) < 0)
++    return -1;
++
++  return clone((void*)fcn, (void*)arg1, (void*)arg2, (void*)stack);
++}
++
++int sys_join(void)
++{
++  void **stack;
++  int stackArg;
++
++  stackArg = argint(0, &stackArg);
++  stack = (void **)stackArg;
++
++  return join(stack);
++}
+ 
+ int
+ sys_fork(void)
+diff -ruN src/ticketlock.h src-finished/ticketlock.h
+--- src/ticketlock.h	1969-12-31 18:00:00.000000000 -0600
++++ src-finished/ticketlock.h	2021-03-26 15:10:48.970895480 -0500
+@@ -0,0 +1,6 @@
++//tick lock structure def
++typedef struct {
++    int ticket; //ticket being served
++    int turn;
++    // struct proc *proc;
++} lock_t;
+\ No newline at end of file
+diff -ruN src/types.h src-finished/types.h
+--- src/types.h	2019-09-25 22:28:17.000000000 -0500
++++ src-finished/types.h	2021-03-26 15:10:49.010915483 -0500
+@@ -2,3 +2,10 @@
+ typedef unsigned short ushort;
+ typedef unsigned char  uchar;
+ typedef uint pde_t;
++
++//tick lock structure def
++typedef struct {
++    int ticket; //ticket being served
++    int turn;
++    // struct proc *proc;
++} lock_t;
+\ No newline at end of file
+diff -ruN src/ulib.c src-finished/ulib.c
+--- src/ulib.c	2019-09-25 22:28:17.000000000 -0500
++++ src-finished/ulib.c	2021-03-27 14:51:29.607056029 -0500
+@@ -3,6 +3,8 @@
+ #include "fcntl.h"
+ #include "user.h"
+ #include "x86.h"
++// #include "ticketlock.h"
++#define PGSIZE    4096
+ 
+ char*
+ strcpy(char *s, const char *t)
+@@ -104,3 +106,31 @@
+     *dst++ = *src++;
+   return vdst;
+ }
++
++int thread_create(void(*start_routine)(void*, void*), void* arg1, void* arg2){
++  void * stack;
++
++  stack = malloc(PGSIZE);
++  return clone(start_routine, arg1, arg2, stack);
++
++}
++
++int thread_join(){
++  void * stack_ptr;
++  int x = join(&stack_ptr);
++  return x;
++}
++
++void lock_init (lock_t *lock){
++  lock->ticket = 0;
++  lock->turn = 0;
++}
++
++void lock_acquire(lock_t *lock){
++  int myturn = fech_and_add(&lock->ticket, 1);
++  while (lock->turn != myturn); //spin to net
++}
++
++void lock_release(lock_t *lock){
++  lock->turn += 1;
++}
+diff -ruN src/user.h src-finished/user.h
+--- src/user.h	2019-09-25 22:28:17.000000000 -0500
++++ src-finished/user.h	2021-03-26 15:10:49.010915483 -0500
+@@ -23,6 +23,8 @@
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int clone(void(*fcn)(void*, void*), void*, void*, void*);
++int join(void**);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+@@ -37,3 +39,8 @@
+ void* malloc(uint);
+ void free(void*);
+ int atoi(const char*);
++int thread_create(void(*start_routine)(void *, void *), void *arg1, void *arg2);
++int thread_join();
++void lock_init (lock_t *lock);
++void lock_acquire(lock_t *lock);
++void lock_release(lock_t *lock);
+diff -ruN src/usys.S src-finished/usys.S
+--- src/usys.S	2019-09-25 22:28:17.000000000 -0500
++++ src-finished/usys.S	2021-03-26 15:10:49.010915483 -0500
+@@ -29,3 +29,5 @@
+ SYSCALL(sbrk)
+ SYSCALL(sleep)
+ SYSCALL(uptime)
++SYSCALL(clone)
++SYSCALL(join)
+diff -ruN src/.vscode/settings.json src-finished/.vscode/settings.json
+--- src/.vscode/settings.json	1969-12-31 18:00:00.000000000 -0600
++++ src-finished/.vscode/settings.json	2021-03-26 15:10:48.970895480 -0500
+@@ -0,0 +1,5 @@
++{
++    "files.associations": {
++        "ticketlock.h": "c"
++    }
++}
+\ No newline at end of file
+diff -ruN src/x86.h src-finished/x86.h
+--- src/x86.h	2019-09-25 22:28:17.000000000 -0500
++++ src-finished/x86.h	2021-03-27 14:54:05.975063485 -0500
+@@ -144,6 +144,16 @@
+   asm volatile("movl %0,%%cr3" : : "r" (val));
+ }
+ 
++static inline int
++fech_and_add(int *addr, int val){
++  __asm__ volatile("lock; xaddl %0, %1"
++        : "+r" (val), "+m" (*addr) // input + output
++        : // No input-only
++        : "memory"
++      );
++  return val;
++}
++
+ //PAGEBREAK: 36
+ // Layout of the trap frame built on the stack by the
+ // hardware and by trapasm.S, and passed to trap().
